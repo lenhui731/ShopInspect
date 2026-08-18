@@ -1,5 +1,41 @@
 const el = (id) => document.getElementById(id);
 
+function escapeHtml(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+// 轻量 Markdown 渲染(Agent 处置方案输出是 md 文本,不引外部库):
+// 支持 # 标题 / **粗体** / *斜体* / - 列表 / 1. 步骤 / 【】高亮 / 缩进层级
+function mdRender(md) {
+  var lines = String(md || "").split(/\r?\n/);
+  var html = [];
+  lines.forEach(function (raw) {
+    var line = raw.replace(/\s+$/, "");
+    if (!line.trim()) { html.push('<div class="md-gap"></div>'); return; }
+    var indent = Math.min(2, Math.floor((raw.match(/^\s*/) || [""])[0].length / 3));
+    var pad = indent * 18;
+    var t = escapeHtml(line.trim());
+    t = t.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
+    t = t.replace(/\*([^*\s][^*]*)\*/g, "<i>$1</i>");
+    t = t.replace(/【([^】]*)】/g, '<span class="md-flag">$1</span>');
+    var m;
+    if ((m = t.match(/^#{1,6}\s+(.+)$/))) {
+      html.push('<div class="md-h" style="padding-left:' + pad + 'px">' + m[1] + "</div>");
+    } else if ((m = t.match(/^[-•]\s+(.+)$/))) {
+      html.push('<div class="md-li" style="padding-left:' + (pad + 14) + 'px">• ' + m[1] + "</div>");
+    } else if ((m = t.match(/^(\d{1,2})[.、)]\s+(.+)$/))) {
+      html.push('<div class="md-step" style="padding-left:' + pad + 'px"><span class="md-no">' + m[1] + "</span>" + m[2] + "</div>");
+    } else {
+      html.push('<div class="md-p" style="padding-left:' + pad + 'px">' + t + "</div>");
+    }
+  });
+  return html.join("");
+}
+
 let mode = "upload";
 let stream = null;
 let liveRunning = false;
@@ -9,12 +45,16 @@ let filterSource = "";
 let filterLabel = "";
 let filterWorkOrder = "";
 let filterBatchId = "";
+let filterStatus = "";
 let knownLabels = {};
 let currentDetailId = null;
 let selected = new Set();
 let lastDetections = [];
 let lastFrameSize = null;
 let liveStats = { fps: 0, lastMs: 0, frames: 0, windowAt: 0 };
+let histLimit = 50;
+let histLoaded = 0;
+let histMore = false;
 
 function toast(msg, type) {
   type = type || "ok";
@@ -134,7 +174,7 @@ function setMode(next) {
   if (mode === "camera") el("stageWrap").classList.add("cam-on");
   else {
     el("stageWrap").classList.remove("cam-on");
-    stopLive();
+    stopCamera(); // 切回上传模式直接关摄像头流,不再亮灯占用设备
   }
   syncPlaceholders();
 }
@@ -432,7 +472,7 @@ async function refreshStats() {
     if (el("kpiBoxes")) el("kpiBoxes").textContent = j.total_detections;
     const src = Object.entries(j.by_source || {}).map(function (kv) { return kv[0] + ":" + kv[1]; }).join(" · ");
     const labs = Object.entries(j.by_label || {}).slice(0, 4).map(function (kv) { return kv[0] + ":" + kv[1]; }).join(" · ");
-    if (el("kpiSource")) el("kpiSource").textContent = labs || src || "-";
+    if (el("kpiSource")) el("kpiSource").textContent = labs || "-";
     if (el("kpiRecordsFoot")) {
       el("kpiRecordsFoot").textContent =
         (src || "no source") +
@@ -481,85 +521,99 @@ function buildRecordQuery(extra) {
   if (filterLabel) q.set("label", filterLabel);
   if (filterWorkOrder) q.set("work_order", filterWorkOrder);
   if (filterBatchId) q.set("batch_id", filterBatchId);
+  if (filterStatus) q.set("status", filterStatus);
   return q;
 }
 
-async function refreshRecords() {
-  const q = buildRecordQuery({ limit: "50" });
+// 单行构建(字段统一转义,用户输入不裸拼 innerHTML)
+function buildRecordRow(row) {
+  const tr = document.createElement("tr");
+  tr.dataset.id = String(row.id);
+  if (row.id === currentDetailId) tr.classList.add("active");
+  if (selected.has(row.id)) tr.classList.add("selected");
+
+  const checked = selected.has(row.id) ? "checked" : "";
+  const thumb = row.image_path
+    ? '<img class="thumb" src="/files/' + encodeURIComponent(String(row.image_path).replace(/^\/+/, "")) + '" alt="" loading="lazy" />'
+    : '<div class="thumb ph"></div>';
+  const timeShort = escapeHtml(String(row.created_at || "").replace("T", " ").slice(5, 19));
+  const top = escapeHtml(row.top_label || "-");
+  const ms = row.elapsed_ms != null ? (Math.round(row.elapsed_ms) + "ms") : "-";
+  const st = row.status
+    ? ('<div class="status-pill ' + (row.status === "alert" ? "alert" : "clear") + '">' + escapeHtml(row.status) + "</div>")
+    : "";
+
+  tr.innerHTML =
+    '<td><input type="checkbox" ' + checked + ' data-sel="' + row.id + '" /></td>' +
+    "<td>" + thumb + "</td>" +
+    "<td><div>" + row.id + "</div>" + st + "</td>" +
+    '<td title="' + escapeHtml(row.created_at || "") + '">' + timeShort + "</td>" +
+    '<td><span class="pill">' + escapeHtml(row.source) + "</span></td>" +
+    '<td title="' + escapeHtml(row.work_order || "-") + '">' + escapeHtml(row.work_order || "-") + "</td>" +
+    '<td title="' + escapeHtml(row.batch_id || "-") + '">' + escapeHtml(row.batch_id || "-") + "</td>" +
+    "<td>" + row.num_detections + "</td>" +
+    "<td>" + top + "</td>" +
+    "<td>" + ms + "</td>" +
+    '<td class="ops">' +
+    '<button type="button" class="btn btn-secondary btn-xs" data-view="' + row.id + '">查看</button>' +
+    '<button type="button" class="btn btn-danger btn-xs" data-del="' + row.id + '">删除</button>' +
+    "</td>";
+
+  const sel = tr.querySelector('[data-sel="' + row.id + '"]');
+  if (sel) {
+    sel.onclick = function (e) {
+      e.stopPropagation();
+      if (e.target.checked) selected.add(row.id);
+      else selected.delete(row.id);
+      tr.classList.toggle("selected", e.target.checked);
+      updateSelCount();
+    };
+  }
+  const viewBtn = tr.querySelector('[data-view="' + row.id + '"]');
+  if (viewBtn) {
+    viewBtn.onclick = function (e) {
+      e.stopPropagation();
+      showDetail(row.id);
+    };
+  }
+  const delBtn = tr.querySelector('[data-del="' + row.id + '"]');
+  if (delBtn) {
+    delBtn.onclick = async function (e) {
+      e.stopPropagation();
+      if (!confirm("删除记录 #" + row.id + "？")) return;
+      try {
+        await deleteOne(row.id);
+        await refreshRecords();
+        await refreshStats();
+        updateSelCount();
+      } catch (err) {
+        toast(err.message, "err");
+      }
+    };
+  }
+  tr.onclick = function () { showDetail(row.id); };
+  return tr;
+}
+
+// append=false 重置到第一页;append=true 追加下一页
+async function refreshRecords(append) {
+  append = append === true;
+  if (!append) histLoaded = 0;
+  const q = buildRecordQuery({ limit: String(histLimit), offset: String(histLoaded) });
   const rows = await (await fetch("/records?" + q.toString())).json();
   const tb = el("tbody");
   if (!tb) return;
-  tb.innerHTML = "";
-  if (el("emptyRecords")) el("emptyRecords").classList.toggle("hidden", rows.length > 0);
-
-  rows.forEach(function (row) {
-    const tr = document.createElement("tr");
-    tr.dataset.id = String(row.id);
-    if (row.id === currentDetailId) tr.classList.add("active");
-    if (selected.has(row.id)) tr.classList.add("selected");
-
-    const checked = selected.has(row.id) ? "checked" : "";
-    const thumb = row.image_path
-      ? '<img class="thumb" src="/files/' + String(row.image_path).replace(/^\/+/, "") + '" alt="" loading="lazy" />'
-      : '<div class="thumb ph"></div>';
-    const timeShort = String(row.created_at || "").replace("T", " ").slice(5, 19);
-    const top = row.top_label || "-";
-    const ms = row.elapsed_ms != null ? (Math.round(row.elapsed_ms) + "ms") : "-";
-    const st = row.status
-      ? ('<div class="status-pill ' + (row.status === "alert" ? "alert" : "clear") + '">' + row.status + "</div>")
+  if (!append) tb.innerHTML = "";
+  rows.forEach(function (row) { tb.appendChild(buildRecordRow(row)); });
+  histLoaded += rows.length;
+  histMore = rows.length >= histLimit;
+  if (el("emptyRecords")) el("emptyRecords").classList.toggle("hidden", histLoaded > 0);
+  if (el("btnLoadMore")) el("btnLoadMore").classList.toggle("hidden", !histMore);
+  if (el("histCount")) {
+    el("histCount").textContent = histLoaded
+      ? ("已加载 " + histLoaded + " 条" + (histMore ? " · 点击加载更多" : ""))
       : "";
-
-    tr.innerHTML =
-      '<td><input type="checkbox" ' + checked + ' data-sel="' + row.id + '" /></td>' +
-      "<td>" + thumb + "</td>" +
-      "<td><div>" + row.id + "</div>" + st + "</td>" +
-      '<td title="' + (row.created_at || "") + '">' + timeShort + "</td>" +
-      '<td><span class="pill">' + row.source + "</span></td>" +
-      '<td title="' + (row.work_order || "-") + '">' + (row.work_order || "-") + "</td>" +
-      '<td title="' + (row.batch_id || "-") + '">' + (row.batch_id || "-") + "</td>" +
-      "<td>" + row.num_detections + "</td>" +
-      "<td>" + top + "</td>" +
-      "<td>" + ms + "</td>" +
-      '<td class="ops">' +
-      '<button type="button" class="btn btn-secondary btn-xs" data-view="' + row.id + '">查看</button>' +
-      '<button type="button" class="btn btn-danger btn-xs" data-del="' + row.id + '">删除</button>' +
-      "</td>";
-
-    const sel = tr.querySelector('[data-sel="' + row.id + '"]');
-    if (sel) {
-      sel.onclick = function (e) {
-        e.stopPropagation();
-        if (e.target.checked) selected.add(row.id);
-        else selected.delete(row.id);
-        tr.classList.toggle("selected", e.target.checked);
-        updateSelCount();
-      };
-    }
-    const viewBtn = tr.querySelector('[data-view="' + row.id + '"]');
-    if (viewBtn) {
-      viewBtn.onclick = function (e) {
-        e.stopPropagation();
-        showDetail(row.id);
-      };
-    }
-    const delBtn = tr.querySelector('[data-del="' + row.id + '"]');
-    if (delBtn) {
-      delBtn.onclick = async function (e) {
-        e.stopPropagation();
-        if (!confirm("删除记录 #" + row.id + "？")) return;
-        try {
-          await deleteOne(row.id);
-          await refreshRecords();
-          await refreshStats();
-          updateSelCount();
-        } catch (err) {
-          toast(err.message, "err");
-        }
-      };
-    }
-    tr.onclick = function () { showDetail(row.id); };
-    tb.appendChild(tr);
-  });
+  }
   updateSelCount();
 }
 
@@ -590,37 +644,30 @@ async function showDetail(id) {
     el("modalId").textContent = j.id;
     el("modalSub").innerHTML =
       (j.status
-        ? ('<span class="status-pill ' + (j.status === "alert" ? "alert" : "clear") + '">' + j.status + "</span> ")
+        ? ('<span class="status-pill ' + (j.status === "alert" ? "alert" : "clear") + '">' + escapeHtml(j.status) + "</span> ")
         : "") +
-      (j.created_at || "") + " · " + (j.source || "");
+      escapeHtml(j.created_at || "") + " · " + escapeHtml(j.source || "");
 
     const size = j.image_width && j.image_height ? (j.image_width + " × " + j.image_height) : "-";
     const labels = j.labels || {};
     const labelText = Object.keys(labels).length
-      ? Object.keys(labels).map(function (k) { return k + " x" + labels[k]; }).join(" · ")
+      ? Object.keys(labels).map(function (k) { return escapeHtml(k) + " x" + labels[k]; }).join(" · ")
       : "-";
 
     el("modalKv").innerHTML =
-      "<span>模型</span><b>" + (j.model || "-") + "</b>" +
+      "<span>模型</span><b>" + escapeHtml(j.model || "-") + "</b>" +
       "<span>检出数</span><b>" + j.num_detections + "</b>" +
-      "<span>主类别</span><b>" + (j.top_label || "-") + "</b>" +
+      "<span>主类别</span><b>" + escapeHtml(j.top_label || "-") + "</b>" +
       "<span>类别分布</span><b>" + labelText + "</b>" +
       "<span>置信度</span><b>avg " + (j.avg_confidence != null ? j.avg_confidence : "-") +
       " / max " + (j.max_confidence != null ? j.max_confidence : "-") + "</b>" +
       "<span>阈值</span><b>" + (j.conf_used != null ? j.conf_used : "-") + "</b>" +
       "<span>耗时</span><b>" + (j.elapsed_ms != null ? (Math.round(j.elapsed_ms) + " ms") : "-") + "</b>" +
       "<span>分辨率</span><b>" + size + "</b>" +
-      "<span>工单号</span><b>" + (j.work_order || "-") + "</b>" +
-      "<span>批次号</span><b>" + (j.batch_id || "-") + "</b>" +
-      "<span>备注</span><b>" + (j.note || "-") + "</b>";
+      "<span>工单号</span><b>" + escapeHtml(j.work_order || "-") + "</b>" +
+      "<span>批次号</span><b>" + escapeHtml(j.batch_id || "-") + "</b>" +
+      "<span>备注</span><b>" + escapeHtml(j.note || "-") + "</b>";
 
-    showChips(
-      Object.keys(labels).map(function (k) {
-        return { label: k, confidence: 1 };
-      }),
-      "modalChips"
-    );
-    // better chips with counts
     const chips = el("modalChips");
     if (chips) {
       chips.innerHTML = "";
@@ -640,7 +687,7 @@ async function showDetail(id) {
         const bbox = (d.bbox_xyxy || []).map(function (v) { return Number(v).toFixed(1); }).join(", ");
         tr.innerHTML =
           "<td>" + (i + 1) + "</td>" +
-          "<td>" + d.label + "</td>" +
+          "<td>" + escapeHtml(d.label) + "</td>" +
           "<td>" + (Number(d.confidence) * 100).toFixed(1) + "%</td>" +
           "<td>[" + bbox + "]</td>";
         body.appendChild(tr);
@@ -660,8 +707,13 @@ async function showDetail(id) {
       }
     }
 
+    // 重置处置方案区(每次打开新记录清空上次的 Agent 结果)
+    if (el("modalDisposeWrap")) el("modalDisposeWrap").style.display = "none";
+    if (el("modalDisposeBody")) el("modalDisposeBody").textContent = "";
+    if (el("modalDisposeRisk")) el("modalDisposeRisk").innerHTML = "";
+    if (el("modalDisposeStatus")) el("modalDisposeStatus").textContent = "";
+
     el("detailModal").classList.add("show");
-    if (el("detailBox")) el("detailBox").style.display = "none";
   } catch (e) {
     toast("打开详情失败: " + e.message, "err");
   }
@@ -703,6 +755,19 @@ function bindUi() {
     refreshRecords();
   }
   if (el("btnApplyFilter")) el("btnApplyFilter").onclick = applyMetaFilters;
+  if (el("btnAlertOnly")) {
+    el("btnAlertOnly").onclick = function () {
+      filterStatus = filterStatus === "alert" ? "" : "alert";
+      el("btnAlertOnly").classList.toggle("active", filterStatus === "alert");
+      refreshRecords();
+    };
+  }
+  if (el("btnLoadMore")) {
+    el("btnLoadMore").onclick = async function () {
+      el("btnLoadMore").disabled = true;
+      try { await refreshRecords(true); } finally { el("btnLoadMore").disabled = false; }
+    };
+  }
   if (el("btnClearFilter")) {
     el("btnClearFilter").onclick = function () {
       if (el("filterWorkOrder")) el("filterWorkOrder").value = "";
@@ -710,6 +775,13 @@ function bindUi() {
       filterWorkOrder = "";
       filterBatchId = "";
       filterLabel = "";
+      filterSource = "";
+      filterStatus = "";
+      // 复位来源按钮与告警开关的高亮态
+      document.querySelectorAll("[data-filter]").forEach(function (b) {
+        b.classList.toggle("active", !b.getAttribute("data-filter"));
+      });
+      if (el("btnAlertOnly")) el("btnAlertOnly").classList.remove("active");
       renderLabelFilters();
       refreshRecords();
     };
@@ -746,30 +818,18 @@ function bindUi() {
       const showDetect = page === "detect" || page === "history";
       if (el("pageDetect")) el("pageDetect").classList.toggle("hidden", !showDetect);
       if (el("pageAbout")) el("pageAbout").classList.toggle("hidden", page !== "about");
+      if (el("pageAgent")) el("pageAgent").classList.toggle("hidden", page !== "agent");
       if (el("pageTitle")) {
         el("pageTitle").textContent =
-          page === "about" ? "说明" : page === "history" ? "历史记录" : "检测工作台";
+          page === "about" ? "说明" : page === "history" ? "历史记录" :
+          page === "agent" ? "缺陷处置" : "检测工作台";
       }
+      if (page === "agent") loadAgentRecords();
       if (page === "history" && el("historyCard")) {
         el("historyCard").scrollIntoView({ behavior: "smooth", block: "start" });
       }
     };
   });
-
-  if (el("btnDeleteOne")) {
-    el("btnDeleteOne").onclick = async function () {
-      if (currentDetailId == null) return;
-      if (!confirm("确定删除记录 #" + currentDetailId + "？")) return;
-      try {
-        await deleteOne(currentDetailId);
-        await refreshRecords();
-        await refreshStats();
-        updateSelCount();
-      } catch (e) {
-        toast(e.message, "err");
-      }
-    };
-  }
 
   if (el("btnBatchDelete")) {
     el("btnBatchDelete").onclick = async function () {
@@ -833,6 +893,149 @@ function bindUi() {
       });
       updateSelCount();
     };
+  }
+
+  // === rag_agent 处置方案接入(最小侵入,新增逻辑不动既有代码)===
+  async function loadDispose(rid) {
+    var wrap = el("modalDisposeWrap");
+    var status = el("modalDisposeStatus");
+    var riskBox = el("modalDisposeRisk");
+    var body = el("modalDisposeBody");
+    if (!wrap) return;
+    wrap.style.display = "block";
+    status.textContent = "Agent 编排中(查 SOP + 查历史,约 10-20 秒)…";
+    riskBox.innerHTML = "";
+    body.textContent = "";
+    try {
+      var j = await fetch("/agent/dispose?record_id=" + rid + "&use_agent=true").then(function (r) { return r.json(); });
+      if (j.detail) { status.textContent = "失败"; body.textContent = String(j.detail); return; }
+      status.textContent = "缺陷: " + (j.top_label || "-") + " · 状态: " + (j.status || "-");
+      if (j.found === false) {
+        body.textContent = j.dispose || "未找到处置方案";
+        return;
+      }
+      // 高危动作确认按钮
+      if (j.needs_confirmation && Array.isArray(j.high_risk_actions) && j.high_risk_actions.length) {
+        riskBox.innerHTML = j.high_risk_actions.map(function (a) {
+          return '<div style="display:flex;align-items:center;gap:6px;padding:6px 8px;background:#fff7ed;border:1px solid #fed7aa;border-radius:6px;margin-bottom:4px">' +
+            '<span style="color:#92400e;font-size:12px">⚠ ' + a + '</span>' +
+            '<button type="button" class="btn btn-secondary btn-xs" data-cf="' + a + '" data-ok="1">批准</button>' +
+            '<button type="button" class="btn btn-secondary btn-xs" data-cf="' + a + '" data-ok="0">拒绝</button>' +
+            '<span data-cfret="' + a + '" style="font-size:11px;color:#9ca3af"></span></div>';
+        }).join("");
+        riskBox.querySelectorAll("[data-cf]").forEach(function (btn) {
+          btn.onclick = async function () {
+            var ret = riskBox.querySelector('[data-cfret="' + btn.dataset.cf + '"]');
+            ret.textContent = "提交中…";
+            try {
+              await fetch("/agent/dispose/confirm", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ record_id: rid, action: btn.dataset.cf, approved: btn.dataset.ok === "1", operator: "看板" })
+              });
+              ret.innerHTML = btn.dataset.ok === "1" ? '<span style="color:#166534">✓ 已批准</span>' : '<span style="color:#b91c1c">✗ 已拒绝</span>';
+            } catch (e) { ret.textContent = "失败"; }
+          };
+        });
+      } else {
+        riskBox.innerHTML = '<span style="color:#166534;font-size:12px">✓ 无高危动作,可按方案处置</span>';
+      }
+      body.innerHTML = mdRender(j.dispose || "");
+    } catch (e) {
+      status.textContent = "请求失败";
+      body.textContent = String(e);
+    }
+  }
+  if (el("modalDispose")) {
+    el("modalDispose").onclick = function () {
+      if (currentDetailId == null) { toast("无当前记录", "err"); return; }
+      loadDispose(currentDetailId);
+    };
+  }
+
+  // === 缺陷处置页(看板内嵌,复用 mdRender/escapeHtml)===
+  var agentLoaded = false;
+  async function loadAgentRecords(force) {
+    var box = el("agentRecList");
+    if (!box) return;
+    if (agentLoaded && !force) return;
+    box.innerHTML = '<div class="empty">加载中…</div>';
+    try {
+      var rows = await fetch("/records?limit=30").then(function (r) { return r.json(); });
+      rows = (rows || []).slice().sort(function (a, b) {
+        var wa = a.status === "alert" ? 1 : 0, wb = b.status === "alert" ? 1 : 0;
+        return wb - wa || b.id - a.id;
+      });
+      if (!rows.length) { box.innerHTML = '<div class="empty">暂无记录,先去检测工作台上传图片</div>'; return; }
+      box.innerHTML = rows.map(function (r) {
+        var st = r.status === "alert"
+          ? '<span class="status-pill alert">告警</span>'
+          : '<span class="status-pill clear">正常</span>';
+        return '<div class="agent-rec" data-rid="' + r.id + '">' +
+          '<span class="rec-id">#' + r.id + "</span>" +
+          '<span class="rec-label pill">' + escapeHtml(r.top_label || "-") + "</span>" + st +
+          '<span class="rec-n">' + (r.num_detections || 0) + " 框</span>" +
+          '<span class="rec-time">' + escapeHtml(String(r.created_at || "").slice(5, 16)) + "</span></div>";
+      }).join("");
+      box.querySelectorAll("[data-rid]").forEach(function (it) {
+        it.onclick = function () {
+          box.querySelectorAll(".agent-rec").forEach(function (x) { x.classList.remove("active"); });
+          it.classList.add("active");
+          loadAgentDispose(it.dataset.rid);
+        };
+      });
+      agentLoaded = true;
+    } catch (e) {
+      box.innerHTML = '<div class="empty">加载失败: ' + escapeHtml(String(e)) + "</div>";
+    }
+  }
+
+  async function loadAgentDispose(rid) {
+    var status = el("agentDisposeStatus");
+    var riskBox = el("agentDisposeRisk");
+    var body = el("agentDisposeBody");
+    var empty = el("agentDisposeEmpty");
+    if (!body) return;
+    empty.classList.add("hidden");
+    body.classList.remove("hidden");
+    status.textContent = "· 编排中(约 10-20 秒)…";
+    riskBox.innerHTML = "";
+    body.innerHTML = '<div class="empty">⏳ Agent 正在查询 SOP 与历史记录…</div>';
+    try {
+      var j = await fetch("/agent/dispose?record_id=" + rid + "&use_agent=true").then(function (r) { return r.json(); });
+      if (j.detail) { status.textContent = "· 失败"; body.innerHTML = '<div class="empty">' + escapeHtml(String(j.detail)) + "</div>"; return; }
+      status.textContent = "· #" + j.record_id + " " + escapeHtml(j.top_label || "-") + " · " + (j.status === "alert" ? "告警" : "正常");
+      if (j.needs_confirmation && Array.isArray(j.high_risk_actions) && j.high_risk_actions.length) {
+        riskBox.innerHTML = j.high_risk_actions.map(function (a) {
+          var ae = escapeHtml(a);
+          return '<div class="risk-item"><span class="risk-name">⚠ ' + ae + "</span>" +
+            '<button type="button" class="btn btn-ok btn-xs" data-cf="' + ae + '" data-ok="1">批准</button>' +
+            '<button type="button" class="btn btn-danger btn-xs" data-cf="' + ae + '" data-ok="0">拒绝</button>' +
+            '<span class="risk-ret" data-cfret="' + ae + '"></span></div>';
+        }).join("");
+        riskBox.querySelectorAll("[data-cf]").forEach(function (btn) {
+          btn.onclick = async function () {
+            var ret = riskBox.querySelector('[data-cfret="' + btn.dataset.cf + '"]');
+            ret.textContent = "提交中…";
+            try {
+              await fetch("/agent/dispose/confirm", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ record_id: Number(rid), action: btn.dataset.cf, approved: btn.dataset.ok === "1", operator: "看板" })
+              });
+              ret.innerHTML = btn.dataset.ok === "1" ? '<span class="risk-ok">✓ 已批准</span>' : '<span class="risk-no">✗ 已拒绝</span>';
+              btn.disabled = true;
+            } catch (e) { ret.textContent = "失败"; }
+          };
+        });
+      }
+      body.innerHTML = j.found === false
+        ? '<div class="empty">' + escapeHtml(j.dispose || "未找到处置方案") + "</div>"
+        : mdRender(j.dispose || "");
+    } catch (e) {
+      status.textContent = "· 请求失败";
+      body.innerHTML = '<div class="empty">' + escapeHtml(String(e)) + "</div>";
+    }
   }
 
   if (el("modalClose")) el("modalClose").onclick = closeDetailModal;

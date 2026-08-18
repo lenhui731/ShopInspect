@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="8" fill="%230d9488"/><text x="16" y="21" font-size="13" font-weight="800" text-anchor="middle" fill="white" font-family="Segoe UI,sans-serif">SI</text></svg>' />
 <title>车间质检台 · ShopInspect</title>
 <style>
 :root{
@@ -119,6 +120,36 @@ tr.selected td{background:#fff7ed}
 .chip.filter{cursor:pointer;border:1px solid #99f6e4;background:#ecfdf5;color:#0f766e;padding:3px 8px;border-radius:999px;font-size:11px;font-weight:650}
 .chip.filter.active{background:#0d9488;color:#fff;border-color:#0d9488}
 .chip.filter-all{background:#fff;border:1px solid #d7dee8;color:#4b5563}
+/* Agent 处置方案 markdown 渲染 */
+.md-body{font-size:13px;line-height:1.75;color:#1f2937;max-height:320px;overflow:auto}
+.md-body .md-h{font-weight:750;color:#111827;margin:10px 0 2px}
+.md-body .md-p{margin:3px 0}
+.md-body .md-li{margin:2px 0;color:#374151}
+.md-body .md-step{margin:5px 0;display:flex;gap:8px;align-items:flex-start}
+.md-body .md-no{flex:none;width:20px;height:20px;border-radius:6px;background:#0d9488;color:#fff;font-size:12px;font-weight:750;display:grid;place-items:center;margin-top:2px}
+.md-body .md-flag{background:#fef3c7;border:1px solid #fde68a;color:#92400e;border-radius:6px;padding:0 6px;font-weight:650;font-size:12px}
+.md-body .md-gap{height:8px}
+.md-body b{color:#0f172a}
+/* 缺陷处置页(agent) */
+.agent-grid{display:grid;grid-template-columns:minmax(280px,.8fr) minmax(0,1.5fr);gap:12px;align-items:start}
+.agent-rec-list{max-height:560px;overflow:auto;display:flex;flex-direction:column;gap:6px;padding-right:2px}
+.agent-rec{display:flex;align-items:center;gap:8px;border:1px solid var(--line);border-radius:10px;background:#fcfdff;padding:8px 10px;cursor:pointer;transition:border-color .15s,background .15s}
+.agent-rec:hover{border-color:#99f6e4}
+.agent-rec.active{background:#ecfeff;border-color:#5eead4}
+.agent-rec .rec-id{font-weight:750;color:var(--title);font-size:12px;flex:none}
+.agent-rec .rec-label{flex:none}
+.agent-rec .rec-time{margin-left:auto;font-size:11px;color:var(--muted);flex:none}
+.agent-rec .rec-n{font-size:11px;color:var(--muted);flex:none}
+.agent-empty{display:grid;place-items:center;gap:6px;text-align:center;padding:48px 16px;color:var(--muted);font-size:13px}
+.agent-empty-ico{font-size:30px;opacity:.75}
+.agent-empty-sub{font-size:12px;color:var(--muted);max-width:360px;line-height:1.6}
+.agent-risk:empty{display:none}
+.agent-risk .risk-item{display:flex;align-items:center;gap:8px;padding:7px 10px;background:#fff7ed;border:1px solid #fed7aa;border-radius:10px;margin-bottom:6px}
+.agent-risk .risk-item .risk-name{color:#92400e;font-size:12px;font-weight:700}
+.agent-risk .risk-item .risk-ret{font-size:11px;color:var(--muted)}
+.agent-risk .risk-item .risk-ok{color:#047857;font-weight:700}
+.agent-risk .risk-item .risk-no{color:#b91c1c;font-weight:700}
+@media (max-width:1100px){.agent-grid{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
@@ -131,6 +162,7 @@ tr.selected td{background:#fff7ed}
     <nav class="nav">
       <button type="button" class="active" data-page="detect">检测工作台</button>
       <button type="button" data-page="history">历史记录</button>
+      <button type="button" data-page="agent">缺陷处置</button>
       <button type="button" data-page="about">说明</button>
     </nav>
   </aside>
@@ -139,7 +171,7 @@ tr.selected td{background:#fff7ed}
     <div class="topbar">
       <div>
         <h1 id="pageTitle">检测工作台</h1>
-        <div class="sub" id="pageSub">ShopInspect v0.1.2 · 详情弹窗 · 扩展字段</div>
+        <div class="sub" id="pageSub">ShopInspect v0.1.4 · 缺陷模型 + RAG 处置</div>
       </div>
       <div class="row">
         <span class="badge" id="healthBadge">检查中…</span>
@@ -151,7 +183,7 @@ tr.selected td{background:#fff7ed}
       <div class="kpi"><div class="label">记录数</div><div class="value" id="kpiRecords">-</div><div class="foot" id="kpiRecordsFoot">-</div></div>
       <div class="kpi"><div class="label">检出框</div><div class="value" id="kpiBoxes">-</div><div class="foot">累计检测框</div></div>
       <div class="kpi"><div class="label">模型状态</div><div class="value" id="kpiModel" style="font-size:16px">-</div><div class="foot" id="kpiDevice">-</div></div>
-      <div class="kpi"><div class="label">类别 Top</div><div class="value" id="kpiSource" style="font-size:13px;line-height:1.35">-</div><div class="foot">by label / source</div></div>
+      <div class="kpi"><div class="label">类别分布</div><div class="value" id="kpiSource" style="font-size:13px;line-height:1.35">-</div><div class="foot">按检出类别计数 · Top 4</div></div>
     </div>
 
     <div id="pageDetect" class="grid">
@@ -234,6 +266,8 @@ tr.selected td{background:#fff7ed}
           <button type="button" class="btn btn-ghost btn-xs" data-filter="upload">upload</button>
           <button type="button" class="btn btn-ghost btn-xs" data-filter="camera">camera</button>
           <button type="button" class="btn btn-ghost btn-xs" data-filter="file">file</button>
+          <span style="width:1px;height:18px;background:var(--line2);margin:0 2px"></span>
+          <button type="button" class="btn btn-ghost btn-xs" id="btnAlertOnly" title="只显示检出缺陷(alert)的记录">⚑ 只看告警</button>
         </div>
         <div class="toolbar" style="gap:6px;align-items:center">
           <input id="filterWorkOrder" type="text" placeholder="筛工单号" style="width:120px;margin:0;padding:6px 8px" />
@@ -270,8 +304,28 @@ tr.selected td{background:#fff7ed}
           </table>
           <div id="emptyRecords" class="empty hidden">暂无历史记录</div>
         </div>
-        <div id="detailBox" class="hidden"></div>
-        <button type="button" class="btn btn-danger btn-xs hidden" id="btnDeleteOne">删除这条</button>
+        <div class="toolbar" style="justify-content:space-between;margin-top:8px">
+          <span id="histCount" style="font-size:12px;color:var(--muted)"></span>
+          <button type="button" class="btn btn-secondary btn-xs hidden" id="btnLoadMore">加载更多</button>
+        </div>
+      </section>
+    </div>
+
+    <div id="pageAgent" class="agent-grid hidden">
+      <section class="card">
+        <h2>告警记录</h2>
+        <p class="hint">点击记录,右侧生成 Agent 处置方案(查 SOP + 查历史)。</p>
+        <div class="agent-rec-list" id="agentRecList"><div class="empty">加载中…</div></div>
+      </section>
+      <section class="card">
+        <h2>Agent 处置方案 <span id="agentDisposeStatus" style="font-size:11px;font-weight:600;color:var(--muted)"></span></h2>
+        <div id="agentDisposeRisk" class="agent-risk"></div>
+        <div id="agentDisposeEmpty" class="agent-empty">
+          <div class="agent-empty-ico">🛠</div>
+          <div>从左侧选择一条告警记录</div>
+          <div class="agent-empty-sub">Agent 将查询维修 SOP 与历史出现情况,给出多步处置方案;高危动作需人工确认。</div>
+        </div>
+        <div id="agentDisposeBody" class="md-body hidden"></div>
       </section>
     </div>
 
@@ -288,6 +342,7 @@ tr.selected td{background:#fff7ed}
     <div class="modal-head">
       <h3>检测详情 #<span id="modalId"></span></h3>
       <div class="row">
+        <button type="button" class="btn btn-primary btn-xs" id="modalDispose">🛠 查看处置方案</button>
         <button type="button" class="btn btn-danger btn-xs" id="modalDelete">删除</button>
         <button type="button" class="btn btn-secondary btn-xs" id="modalClose">关闭</button>
       </div>
@@ -309,12 +364,20 @@ tr.selected td{background:#fff7ed}
           <summary style="cursor:pointer;color:#6b7280;font-size:12px">原始 JSON</summary>
           <pre id="modalJson" style="margin-top:8px;background:#f8fafc;border:1px solid #e6ebf2;border-radius:10px;padding:10px;max-height:150px;overflow:auto;font-size:12px"></pre>
         </details>
+        <div id="modalDisposeWrap" style="display:none;margin-top:12px;border:1px solid #2563eb;border-radius:10px;padding:12px;background:#f8fbff">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+            <b style="color:#1d4ed8">🛠 Agent 处置方案</b>
+            <span id="modalDisposeStatus" style="font-size:12px;color:#6b7280"></span>
+          </div>
+          <div id="modalDisposeRisk" style="margin-bottom:8px"></div>
+          <div id="modalDisposeBody" class="md-body"></div>
+        </div>
       </div>
     </div>
   </div>
 </div>
 
 <div class="toast" id="toast"></div>
-<script src="/static/app.js?v=013"></script>
+<script src="/static/app.js?v=018"></script>
 </body>
 </html>

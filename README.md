@@ -12,6 +12,33 @@
 
 ---
 
+## 本 fork 新增（V2，基于上游 V1.3）
+
+本 fork（[xuzhili835/ShopInspect](https://github.com/xuzhili835/ShopInspect)）基于 [lenhui731/ShopInspect](https://github.com/lenhui731/ShopInspect)（检测工程闭环 V1.3），新增两块能力。以下正文保持上游原版 README 不变。
+
+1. **缺陷检测模型 `defect_model/`**：NEU-DET 数据集（钢材表面 6 类缺陷）自训 `def_best.pt`，mAP50=0.817，CPU ~28ms/张。权重经 [Release model-defect-v1](https://github.com/xuzhili835/ShopInspect/releases/tag/model-defect-v1) 分发（`*.pt` 不进 git）；下载后放 `models/`，`config.yaml → model_path` 即切换。
+2. **缺陷处置 `rag_agent/`（RAG + Agent + HITL）**：检测出缺陷 → RAG 查维修 SOP（bge-m3 + Chroma，带来源引用与拒答）→ Agent 多步处置方案（LangGraph ReAct，查 SOP + 查历史）→ 高危动作（换件 / 停机等）人工确认。LangChain + LangGraph，单进程单端口挂载（`/agent`），看板侧栏新增「缺陷处置」页。
+
+上游 V2+ 预留清单中的「缺陷自训模型」「缺陷 SOP 知识库（RAG）」两项已在本 fork 实现，其余预留项见文末。
+
+### fork 额外的安装步骤
+
+```powershell
+# rag_agent 依赖（langchain / chromadb 等，装同一 venv）
+pip install -r rag_agent/requirements.txt -i https://mirrors.aliyun.com/pypi/simple
+
+# 密钥：复制模板后填 SiliconFlow API key（不进 git）
+copy rag_agent\.env.example rag_agent\.env
+
+# 首次建向量库：把 rag_agent/data/sop/*.md 灌进 Chroma
+python -m rag_agent.build_index
+
+# 缺陷权重：从 Release model-defect-v1 下载 def_best.pt 放 models/
+# （未下载时可将 config.yaml 的 model_path 改回 yolo11n.pt 用通用权重）
+```
+
+---
+
 ## 为什么做这个项目
 
 东莞及珠三角大量制造业岗位需要的是 **「模型能进工位、结果能进系统」**，不是只跑通 notebook。

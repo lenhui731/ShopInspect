@@ -70,6 +70,15 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# rag_agent 接入(单进程单端口):langchain 栈未装时跳过,不影响 ShopInspect 主功能
+try:
+    from rag_agent.api import router as _rag_router
+
+    app.include_router(_rag_router, prefix="/agent")
+    print("[ShopInspect] rag_agent enabled at /agent")
+except Exception as _rag_e:  # noqa: BLE001
+    print(f"[ShopInspect] rag_agent disabled: {_rag_e}")
+
 if static_dir.exists():
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
@@ -302,6 +311,7 @@ def records(
     label: Optional[str] = Query(None),
     work_order: Optional[str] = Query(None),
     batch_id: Optional[str] = Query(None),
+    status: Optional[str] = Query(None, description="alert|clear"),
 ) -> list[RecordSummary]:
     rows = list_records(
         limit=limit,
@@ -310,6 +320,7 @@ def records(
         label=label,
         work_order=work_order,
         batch_id=batch_id,
+        status=status,
     )
     return [RecordSummary(**r) for r in rows]
 
@@ -322,6 +333,7 @@ def records_export_csv(
     label: Optional[str] = Query(None),
     work_order: Optional[str] = Query(None),
     batch_id: Optional[str] = Query(None),
+    status: Optional[str] = Query(None, description="alert|clear"),
 ):
     rows = list_records(
         limit=limit,
@@ -330,6 +342,7 @@ def records_export_csv(
         label=label,
         work_order=work_order,
         batch_id=batch_id,
+        status=status,
     )
     buf = io.StringIO()
     writer = csv.writer(buf)

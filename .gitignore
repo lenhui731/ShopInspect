@@ -16,3 +16,18 @@ Thumbs.db
 *.log
 .idea/
 .vscode/
+
+# rag_agent / 缺陷模型训练产物
+runs/
+defect_model/dataset/
+defect_model/dataset_src/
+defect_model/*.pt
+models/*.pt
+rag_agent/data/chroma/
+.zcode/
+runs/
+.playwright-cli/
+# 内部协作文档(你我之间约定,不进仓库)
+HANDOFF_PROMPT.md
+INTEGRATION_PLAN.md
+RESUME_NOTES.md
